@@ -60,6 +60,10 @@ def execute(filters=None):
 		item_detail = item_details[sle.item_code]
 
 		sle.update(item_detail)
+
+		# retrieve amount and applicable charges from LCVs
+		set_lcv_amount_and_charges(sle)
+
 		if bundle_info := bundle_details.get(sle.serial_and_batch_bundle):
 			data.extend(get_segregated_bundle_entries(sle, bundle_info, batch_balance_dict, filters))
 			continue
@@ -100,7 +104,6 @@ def execute(filters=None):
 
 	update_included_uom_in_report(columns, data, include_uom, conversion_factors)
 	return columns, data
-
 
 def get_segregated_bundle_entries(sle, bundle_details, batch_balance_dict, filters):
 	segregated_entries = []
@@ -316,6 +319,18 @@ def get_columns(filters):
 				"fieldtype": "Currency",
 				"width": 110,
 				"options": "Company:company:default_currency",
+			},
+			{
+				"label": _("Amount"),
+				"fieldname": "amount",
+				"fieldtype": "Currency",
+				"width": 120,
+			},
+			{
+				"label": _("Applicable Charges"),
+				"fieldname": "applicable_charges",
+				"fieldtype": "Currency",
+				"width": 150,
 			},
 			{"label": _("Voucher Type"), "fieldname": "voucher_type", "width": 110},
 			{
@@ -657,3 +672,43 @@ def check_inventory_dimension_filters_applied(filters) -> bool:
 			return True
 
 	return False
+
+# function to set amount and applicable charge
+def set_lcv_amount_and_charges(sle):
+    """
+    Updates the Stock Ledger Entry with amount and applicable_charges
+    from related Landed Cost Voucher(s), if voucher_type is Purchase Receipt or Purchase Invoice.
+    """
+    # only apply to Purchase Receipt or Purchase Invoice
+    if sle.voucher_type not in ("Purchase Receipt", "Purchase Invoice"):
+        return
+
+    # initialize fields
+    sle["amount"] = 0
+    sle["applicable_charges"] = 0
+    found_amount = False
+
+    # get all LCVs linked to this voucher_no + voucher_type 
+    linked_lcvs = frappe.db.sql("""
+        SELECT parent 
+        FROM `tabLanded Cost Purchase Receipt`
+        WHERE receipt_document = %s AND receipt_document_type = %s
+    """, (sle.voucher_no, sle.voucher_type), as_dict=True)
+
+    if linked_lcvs:
+        for lcv_ref in linked_lcvs:
+            lcv_doc = frappe.get_doc("Landed Cost Voucher", lcv_ref.parent)
+
+            for item in lcv_doc.items:
+                if (
+                    item.receipt_document == sle.voucher_no and
+                    item.receipt_document_type == sle.voucher_type and
+                    item.item_code == sle.item_code
+                ):
+                    # take amount only once (same for all matching LCVs)
+                    if not found_amount:
+                        sle["amount"] = item.amount or 0
+                        found_amount = True
+
+                    # sum applicable_charges
+                    sle["applicable_charges"] += item.applicable_charges or 0
